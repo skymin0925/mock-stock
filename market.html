@@ -21,28 +21,55 @@
 
 <main>
   <h1>종목 시세</h1>
+
   <div class="card summary">
     <div><div class="label">보유 현금</div><div class="value" id="cash">-</div></div>
     <div><div class="label">시세 기준</div><div class="value" id="updated" style="font-size:15px">-</div></div>
   </div>
 
+  <div class="searchbar">
+    <input type="text" id="search" placeholder="종목명 또는 코드 검색 (예: 삼성, 005930)" oninput="applyFilter()">
+    <button class="ghost" onclick="clearSearch()">초기화</button>
+  </div>
+
   <table>
     <thead>
-      <tr>
-        <th>종목</th><th>현재가</th><th>등락률</th><th>수량</th><th>주문</th>
-      </tr>
+      <tr><th>종목</th><th>현재가</th><th>등락률</th><th>수량</th><th>주문</th></tr>
     </thead>
     <tbody id="rows"><tr><td colspan="5">불러오는 중...</td></tr></tbody>
   </table>
-  <p class="hint">시세는 약 10분 간격으로 갱신되는 지연 시세입니다. 실시간 가격과 다를 수 있습니다.</p>
-  <div id="msg" class="msg"></div>
+  <p class="hint">종목명을 클릭하면 차트를 볼 수 있습니다. 시세는 약 1분 간격으로 갱신되는 지연 시세입니다.</p>
 </main>
 
+<!-- 알림 / 확인 팝업 -->
+<div id="popup" class="overlay" onclick="if(event.target===this) closePopup(false)">
+  <div class="popup">
+    <h3 id="popup-title"></h3>
+    <p id="popup-body"></p>
+    <div class="popup-actions" id="popup-actions"></div>
+  </div>
+</div>
+
+<!-- 차트 팝업 -->
+<div id="chart-modal" class="overlay" onclick="if(event.target===this) closeChart()">
+  <div class="popup wide">
+    <h3 id="chart-title"></h3>
+    <p id="chart-sub" class="hint" style="margin-top:0"></p>
+    <canvas id="chart-canvas" height="220"></canvas>
+    <div class="popup-actions">
+      <button onclick="closeChart()">닫기</button>
+    </div>
+  </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <script src="js/config.js"></script>
 <script src="js/app.js"></script>
 <script>
-let profile = null;
+let stockList = [];
+let chart = null;
+let popupResolve = null;
 
 start();
 
@@ -51,10 +78,11 @@ async function start() {
   if (!user) return;
   await loadProfile();
   await loadStocks();
+  setInterval(loadStocks, 60000);   // 1분마다 시세 자동 새로고침
 }
 
 async function loadProfile() {
-  profile = await myProfile();
+  const profile = await myProfile();
   if (profile) {
     document.getElementById('me').textContent = profile.nickname + ' 님';
     document.getElementById('cash').textContent = won(profile.cash);
@@ -63,59 +91,183 @@ async function loadProfile() {
 
 async function loadStocks() {
   const { data, error } = await db.from('stocks').select('*').order('name');
-  const tbody = document.getElementById('rows');
-
   if (error) {
-    tbody.innerHTML = '<tr><td colspan="5">불러오기 실패: ' + error.message + '</td></tr>';
+    document.getElementById('rows').innerHTML =
+      '<tr><td colspan="5">불러오기 실패: ' + error.message + '</td></tr>';
     return;
   }
-  if (!data.length) {
-    tbody.innerHTML = '<tr><td colspan="5">등록된 종목이 없습니다.</td></tr>';
+  stockList = data;
+  renderRows();
+
+  const latest = data.map(s => s.updated_at).filter(Boolean).sort().pop();
+  document.getElementById('updated').textContent =
+    latest ? new Date(latest).toLocaleTimeString('ko-KR') : '갱신 전';
+}
+
+function renderRows() {
+  const keyword = document.getElementById('search').value.trim().toLowerCase();
+  const list = stockList.filter(s =>
+    !keyword || s.name.toLowerCase().includes(keyword) || s.code.includes(keyword)
+  );
+
+  const tbody = document.getElementById('rows');
+  if (!list.length) {
+    tbody.innerHTML = '<tr><td colspan="5">검색 결과가 없습니다.</td></tr>';
     return;
   }
 
-  let latest = null;
-  tbody.innerHTML = data.map(s => {
+  tbody.innerHTML = list.map(s => {
     const rate = s.prev_close > 0 ? ((s.price - s.prev_close) / s.prev_close) * 100 : null;
-    if (s.updated_at && (!latest || s.updated_at > latest)) latest = s.updated_at;
     return `
       <tr>
-        <td><strong>${s.name}</strong><br><span style="color:#9ca3af;font-size:12px">${s.code}</span></td>
+        <td>
+          <a href="#" class="stock-link" onclick="openChart('${s.code}');return false;">${s.name}</a>
+          <br><span class="code">${s.code}</span>
+        </td>
         <td>${s.price > 0 ? won(s.price) : '-'}</td>
         <td class="${rate === null ? '' : signClass(rate)}">${rate === null ? '-' : pct(rate)}</td>
         <td><input type="number" id="qty-${s.code}" value="1" min="1" step="1"></td>
-        <td>
+        <td class="nowrap">
           <button class="buy"  onclick="trade('${s.code}','buy')">매수</button>
           <button class="sell" onclick="trade('${s.code}','sell')">매도</button>
         </td>
       </tr>`;
   }).join('');
-
-  document.getElementById('updated').textContent =
-    latest ? new Date(latest).toLocaleString('ko-KR') : '갱신 전';
 }
 
-async function trade(code, side) {
-  const qty = parseInt(document.getElementById('qty-' + code).value, 10);
-  if (!qty || qty < 1) { setMsg('수량을 1주 이상 입력하세요.', 'error'); return; }
+function applyFilter() { renderRows(); }
+function clearSearch() {
+  document.getElementById('search').value = '';
+  renderRows();
+}
 
-  setMsg('주문 처리 중...');
+/* ---------- 주문 ---------- */
+
+async function trade(code, side) {
+  const stock = stockList.find(s => s.code === code);
+  const qty = parseInt(document.getElementById('qty-' + code).value, 10);
+  const label = side === 'buy' ? '매수' : '매도';
+
+  if (!qty || qty < 1) {
+    await showPopup('주문 오류', '수량을 1주 이상 입력하세요.', 'error');
+    return;
+  }
+
+  const agreed = await showConfirm(
+    label + ' 확인',
+    `${stock.name} ${qty.toLocaleString()}주\n예상 금액 ${won(stock.price * qty)}\n\n${label}하시겠습니까?`
+  );
+  if (!agreed) return;
+
   const fn = side === 'buy' ? 'buy_stock' : 'sell_stock';
   const { data, error } = await db.rpc(fn, { p_code: code, p_qty: qty });
 
-  if (error) { setMsg('주문 실패: ' + error.message, 'error'); return; }
+  if (error) {
+    await showPopup(label + ' 실패', error.message, 'error');
+    return;
+  }
 
-  setMsg(`${side === 'buy' ? '매수' : '매도'} 완료 — ${qty}주, ${won(data.amount)}`, 'ok');
+  await showPopup(
+    label + ' 완료',
+    `${stock.name} ${qty.toLocaleString()}주\n체결가 ${won(data.price)}\n총 ${label}금액 ${won(data.amount)}`,
+    'ok'
+  );
   await loadProfile();
 }
 
-function setMsg(text, type) {
-  const el = document.getElementById('msg');
-  el.textContent = text;
-  el.className = 'msg ' + (type || '');
-  if (type === 'error') alert(text);
+/* ---------- 팝업 ---------- */
+
+function showPopup(title, body, type) {
+  return openPopup(title, body, type, false);
+}
+function showConfirm(title, body) {
+  return openPopup(title, body, '', true);
 }
 
+function openPopup(title, body, type, isConfirm) {
+  const el = document.getElementById('popup');
+  document.getElementById('popup-title').textContent = title;
+  document.getElementById('popup-title').className = type || '';
+  document.getElementById('popup-body').textContent = body;
+
+  document.getElementById('popup-actions').innerHTML = isConfirm
+    ? `<button class="ghost" onclick="closePopup(false)">취소</button>
+       <button onclick="closePopup(true)">확인</button>`
+    : `<button onclick="closePopup(true)">확인</button>`;
+
+  el.style.display = 'flex';
+  return new Promise(resolve => { popupResolve = resolve; });
+}
+
+function closePopup(result) {
+  document.getElementById('popup').style.display = 'none';
+  if (popupResolve) { popupResolve(result); popupResolve = null; }
+}
+
+/* ---------- 차트 ---------- */
+
+async function openChart(code) {
+  const stock = stockList.find(s => s.code === code);
+  document.getElementById('chart-title').textContent = `${stock.name} (${stock.code})`;
+  document.getElementById('chart-sub').textContent = '불러오는 중...';
+  document.getElementById('chart-modal').style.display = 'flex';
+
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await db
+    .from('price_history')
+    .select('ts, price')
+    .eq('code', code)
+    .gte('ts', since)
+    .order('ts');
+
+  if (error) {
+    document.getElementById('chart-sub').textContent = '불러오기 실패: ' + error.message;
+    return;
+  }
+  if (!data || data.length < 2) {
+    document.getElementById('chart-sub').textContent =
+      '아직 기록된 시세가 부족합니다. 장중에 데이터가 쌓이면 표시됩니다.';
+    if (chart) { chart.destroy(); chart = null; }
+    return;
+  }
+
+  const first = Number(data[0].price);
+  const last = Number(data[data.length - 1].price);
+  const diff = ((last / first) - 1) * 100;
+  document.getElementById('chart-sub').textContent =
+    `최근 24시간 · ${data.length}개 기록 · 구간 등락 ${pct(diff)}`;
+
+  const color = diff >= 0 ? '#d32f2f' : '#1565c0';
+  if (chart) chart.destroy();
+  chart = new Chart(document.getElementById('chart-canvas'), {
+    type: 'line',
+    data: {
+      labels: data.map(d => new Date(d.ts).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })),
+      datasets: [{
+        data: data.map(d => Number(d.price)),
+        borderColor: color,
+        backgroundColor: color + '20',
+        borderWidth: 2,
+        pointRadius: 0,
+        fill: true,
+        tension: 0.2
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { label: c => won(c.parsed.y) } } },
+      scales: {
+        x: { ticks: { maxTicksLimit: 8 } },
+        y: { ticks: { callback: v => Number(v).toLocaleString('ko-KR') } }
+      }
+    }
+  });
+}
+
+function closeChart() {
+  document.getElementById('chart-modal').style.display = 'none';
+}
 </script>
 </body>
 </html>
