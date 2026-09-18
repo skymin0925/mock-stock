@@ -113,7 +113,9 @@ function setMsg(text, type) {
   const el = document.getElementById('msg');
   el.textContent = text;
   el.className = 'msg ' + (type || '');
+  if (type === 'error') alert(text);
 }
+
 </script>
 </body>
 </html>
