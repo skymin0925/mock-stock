@@ -2,14 +2,17 @@ name: 주가 자동 갱신
 
 on:
   schedule:
-    # 한국 시간 평일 09~16시 (UTC 0~6시)에 매시 정각 시작 → 내부에서 1분마다 반복
-    - cron: '0 0-6 * * 1-5'
+    # 한국 시간 평일 09~16시, 30분마다 시작 (예약 지연 대비)
+    - cron: '0,30 0-6 * * 1-5'
   workflow_dispatch:
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 65
+    timeout-minutes: 40
+    concurrency:
+      group: price-updater
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -18,11 +21,14 @@ jobs:
           python-version: '3.11'
 
       - name: 라이브러리 설치
-        run: pip install yfinance requests
+        run: pip install requests
 
-      - name: 시세 갱신 (1분 간격 반복)
+      - name: 시세 갱신
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          LOOP_MINUTES: '58'
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          LOOP_MINUTES: '29'
+          INTERVAL_SECONDS: '20'
         run: python scripts/update_prices.py

@@ -3,30 +3,77 @@ import time
 from datetime import datetime, timedelta, timezone
 
 import requests
-import yfinance as yf
 
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
-LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "0"))  # 0이면 1회만 실행
+KIS_APP_KEY = os.environ["KIS_APP_KEY"]
+KIS_APP_SECRET = os.environ["KIS_APP_SECRET"]
+
+LOOP_MINUTES = int(os.environ.get("LOOP_MINUTES", "0"))
+INTERVAL = int(os.environ.get("INTERVAL_SECONDS", "20"))   # 시세 갱신 주기(초)
+
+KIS_BASE = "https://openapi.koreainvestment.com:9443"
+KST = timezone(timedelta(hours=9))
 
 HEADERS = {
     "apikey": SERVICE_KEY,
     "Authorization": f"Bearer {SERVICE_KEY}",
     "Content-Type": "application/json",
 }
-KST = timezone(timedelta(hours=9))
+
+_token = {"value": None, "expires": 0}
+
+
+def kis_token():
+    """접근토큰 (24시간 유효). 자주 재발급하면 차단되므로 캐싱한다."""
+    if _token["value"] and time.time() < _token["expires"]:
+        return _token["value"]
+    r = requests.post(f"{KIS_BASE}/oauth2/tokenP", json={
+        "grant_type": "client_credentials",
+        "appkey": KIS_APP_KEY,
+        "appsecret": KIS_APP_SECRET,
+    }, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"토큰 발급 실패 {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    _token["value"] = data["access_token"]
+    _token["expires"] = time.time() + 60 * 60 * 12
+    print("접근토큰 발급 완료")
+    return _token["value"]
+
+
+def kis_quote(code):
+    """국내주식 현재가 조회 → (현재가, 전일종가)"""
+    r = requests.get(
+        f"{KIS_BASE}/uapi/domestic-stock/v1/quotations/inquire-price",
+        headers={
+            "authorization": f"Bearer {kis_token()}",
+            "appkey": KIS_APP_KEY,
+            "appsecret": KIS_APP_SECRET,
+            "tr_id": "FHKST01010100",
+            "custtype": "P",
+        },
+        params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code},
+        timeout=15,
+    )
+    r.raise_for_status()
+    body = r.json()
+    if body.get("rt_cd") not in (None, "0"):
+        raise RuntimeError(f"{body.get('msg_cd')} {body.get('msg1')}")
+    out = body.get("output") or {}
+    return float(out.get("stck_prpr") or 0), float(out.get("stck_sdpr") or 0)
 
 
 def get_stocks():
-    r = requests.get(f"{SUPABASE_URL}/rest/v1/stocks?select=code,yf_symbol",
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/stocks?select=code,name",
                      headers=HEADERS, timeout=30)
     r.raise_for_status()
-    return [s for s in r.json() if s.get("yf_symbol")]
+    return r.json()
 
 
 def is_market_open():
     now = datetime.now(KST)
-    if now.weekday() >= 5:           # 토·일
+    if now.weekday() >= 5:
         return False
     minutes = now.hour * 60 + now.minute
     return 9 * 60 <= minutes <= 15 * 60 + 40
@@ -38,83 +85,57 @@ def cleanup_history():
                     headers=HEADERS, timeout=30)
 
 
-def fetch_prev_closes(symbols):
-    """전일 종가 (등락률 계산용)"""
-    result = {}
-    data = yf.download(symbols, period="7d", interval="1d", group_by="ticker",
-                       progress=False, auto_adjust=False, threads=False)
-    for sym in symbols:
-        try:
-            closes = (data[sym]["Close"] if len(symbols) > 1 else data["Close"]).dropna()
-            if len(closes) >= 2:
-                result[sym] = float(closes.iloc[-2])
-            elif len(closes) == 1:
-                result[sym] = float(closes.iloc[-1])
-        except Exception as e:
-            print(f"  [전일종가 실패] {sym}: {e}")
-    return result
-
-
-def fetch_prices(symbols):
-    """1분봉 기준 최신가"""
-    result = {}
-    data = yf.download(symbols, period="1d", interval="1m", group_by="ticker",
-                       progress=False, auto_adjust=False, threads=False)
-    for sym in symbols:
-        try:
-            closes = (data[sym]["Close"] if len(symbols) > 1 else data["Close"]).dropna()
-            if len(closes) >= 1:
-                result[sym] = float(closes.iloc[-1])
-        except Exception as e:
-            print(f"  [시세 실패] {sym}: {e}")
-    return result
-
-
-def save(stocks, prices, prev_closes):
-    rows = []
+def update_once(stocks, save_history):
+    rows, failed = [], 0
     for s in stocks:
-        code, sym = s["code"], s["yf_symbol"]
-        price = prices.get(sym)
-        if not price:
-            continue
-        body = {"price": round(price, 2), "updated_at": "now()"}
-        if sym in prev_closes:
-            body["prev_close"] = round(prev_closes[sym], 2)
-        requests.patch(f"{SUPABASE_URL}/rest/v1/stocks?code=eq.{code}",
-                       headers=HEADERS, json=body, timeout=30)
-        rows.append({"code": code, "price": round(price, 2)})
+        code = s["code"]
+        try:
+            price, base = kis_quote(code)
+            if price <= 0:
+                continue
+            requests.patch(
+                f"{SUPABASE_URL}/rest/v1/stocks?code=eq.{code}",
+                headers=HEADERS,
+                json={"price": price, "prev_close": base, "updated_at": "now()"},
+                timeout=30)
+            rows.append({"code": code, "price": price})
+        except Exception as e:
+            failed += 1
+            print(f"  [실패] {code}: {e}")
+        time.sleep(0.08)      # 초당 호출 제한 회피
 
-    if rows:   # 차트용 기록은 한 번에 저장
+    if rows and save_history:
         requests.post(f"{SUPABASE_URL}/rest/v1/price_history",
                       headers=HEADERS, json=rows, timeout=30)
-    return len(rows)
+
+    return len(rows), failed
 
 
 def main():
     stocks = get_stocks()
-    symbols = [s["yf_symbol"] for s in stocks]
-    print(f"대상 종목 {len(symbols)}개")
-
+    print(f"대상 종목 {len(stocks)}개 · 갱신 주기 {INTERVAL}초")
     cleanup_history()
-    prev_closes = fetch_prev_closes(symbols)
-    print(f"전일 종가 {len(prev_closes)}개 확보")
 
     deadline = time.time() + LOOP_MINUTES * 60
+    last_history = 0
+
     while True:
         started = time.time()
         if is_market_open():
-            try:
-                prices = fetch_prices(symbols)
-                n = save(stocks, prices, prev_closes)
-                print(f"[{datetime.now(KST):%H:%M:%S}] {n}개 갱신")
-            except Exception as e:
-                print(f"[{datetime.now(KST):%H:%M:%S}] 갱신 실패: {e}")
+            # 차트 기록은 1분에 한 번만 저장
+            save_history = (started - last_history) >= 60
+            ok, failed = update_once(stocks, save_history)
+            if save_history:
+                last_history = started
+            print(f"[{datetime.now(KST):%H:%M:%S}] {ok}개 갱신"
+                  + (f" (실패 {failed})" if failed else ""))
         else:
             print(f"[{datetime.now(KST):%H:%M:%S}] 장 시간이 아닙니다")
+            time.sleep(30)
 
         if LOOP_MINUTES == 0 or time.time() >= deadline:
             break
-        time.sleep(max(0, 60 - (time.time() - started)))
+        time.sleep(max(0, INTERVAL - (time.time() - started)))
 
     print("종료")
 

@@ -112,6 +112,11 @@ async function loadHoldings() {
 }
 
 async function loadTransactions() {
+  // 종목 코드 → 이름 사전 만들기
+  const { data: stocks } = await db.from('stocks').select('code, name');
+  const nameOf = {};
+  (stocks || []).forEach(s => { nameOf[s.code] = s.name; });
+
   const { data, error } = await db
     .from('transactions')
     .select('created_at, code, side, quantity, price, amount')
@@ -131,7 +136,8 @@ async function loadTransactions() {
   tbody.innerHTML = data.map(t => `
     <tr>
       <td>${new Date(t.created_at).toLocaleString('ko-KR')}</td>
-      <td>${t.code}</td>
+      <td><strong>${nameOf[t.code] || t.code}</strong>
+          <span class="code">${t.code}</span></td>
       <td class="${t.side === 'buy' ? 'up' : 'down'}">${t.side === 'buy' ? '매수' : '매도'}</td>
       <td>${t.quantity.toLocaleString()}주</td>
       <td>${won(t.price)}</td>
