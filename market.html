@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>시세 · 모의 주식 투자</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header>
+  <span class="logo">📈 모의 주식 투자</span>
+  <nav>
+    <a href="market.html" class="active">시세</a>
+    <a href="portfolio.html">내 자산</a>
+    <a href="ranking.html">랭킹</a>
+  </nav>
+  <span class="me" id="me"></span>
+  <button class="ghost" onclick="logout()">로그아웃</button>
+</header>
+
+<main>
+  <h1>종목 시세</h1>
+  <div class="card summary">
+    <div><div class="label">보유 현금</div><div class="value" id="cash">-</div></div>
+    <div><div class="label">시세 기준</div><div class="value" id="updated" style="font-size:15px">-</div></div>
+  </div>
+
+  <table>
+    <thead>
+      <tr>
+        <th>종목</th><th>현재가</th><th>등락률</th><th>수량</th><th>주문</th>
+      </tr>
+    </thead>
+    <tbody id="rows"><tr><td colspan="5">불러오는 중...</td></tr></tbody>
+  </table>
+  <p class="hint">시세는 약 10분 간격으로 갱신되는 지연 시세입니다. 실시간 가격과 다를 수 있습니다.</p>
+  <div id="msg" class="msg"></div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+<script>
+let profile = null;
+
+start();
+
+async function start() {
+  const user = await requireLogin();
+  if (!user) return;
+  await loadProfile();
+  await loadStocks();
+}
+
+async function loadProfile() {
+  profile = await myProfile();
+  if (profile) {
+    document.getElementById('me').textContent = profile.nickname + ' 님';
+    document.getElementById('cash').textContent = won(profile.cash);
+  }
+}
+
+async function loadStocks() {
+  const { data, error } = await db.from('stocks').select('*').order('name');
+  const tbody = document.getElementById('rows');
+
+  if (error) {
+    tbody.innerHTML = '<tr><td colspan="5">불러오기 실패: ' + error.message + '</td></tr>';
+    return;
+  }
+  if (!data.length) {
+    tbody.innerHTML = '<tr><td colspan="5">등록된 종목이 없습니다.</td></tr>';
+    return;
+  }
+
+  let latest = null;
+  tbody.innerHTML = data.map(s => {
+    const rate = s.prev_close > 0 ? ((s.price - s.prev_close) / s.prev_close) * 100 : null;
+    if (s.updated_at && (!latest || s.updated_at > latest)) latest = s.updated_at;
+    return `
+      <tr>
+        <td><strong>${s.name}</strong><br><span style="color:#9ca3af;font-size:12px">${s.code}</span></td>
+        <td>${s.price > 0 ? won(s.price) : '-'}</td>
+        <td class="${rate === null ? '' : signClass(rate)}">${rate === null ? '-' : pct(rate)}</td>
+        <td><input type="number" id="qty-${s.code}" value="1" min="1" step="1"></td>
+        <td>
+          <button class="buy"  onclick="trade('${s.code}','buy')">매수</button>
+          <button class="sell" onclick="trade('${s.code}','sell')">매도</button>
+        </td>
+      </tr>`;
+  }).join('');
+
+  document.getElementById('updated').textContent =
+    latest ? new Date(latest).toLocaleString('ko-KR') : '갱신 전';
+}
+
+async function trade(code, side) {
+  const qty = parseInt(document.getElementById('qty-' + code).value, 10);
+  if (!qty || qty < 1) { setMsg('수량을 1주 이상 입력하세요.', 'error'); return; }
+
+  setMsg('주문 처리 중...');
+  const fn = side === 'buy' ? 'buy_stock' : 'sell_stock';
+  const { data, error } = await db.rpc(fn, { p_code: code, p_qty: qty });
+
+  if (error) { setMsg('주문 실패: ' + error.message, 'error'); return; }
+
+  setMsg(`${side === 'buy' ? '매수' : '매도'} 완료 — ${qty}주, ${won(data.amount)}`, 'ok');
+  await loadProfile();
+}
+
+function setMsg(text, type) {
+  const el = document.getElementById('msg');
+  el.textContent = text;
+  el.className = 'msg ' + (type || '');
+}
+</script>
+</body>
+</html>

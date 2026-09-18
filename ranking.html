@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>랭킹 · 모의 주식 투자</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header>
+  <span class="logo">📈 모의 주식 투자</span>
+  <nav>
+    <a href="market.html">시세</a>
+    <a href="portfolio.html">내 자산</a>
+    <a href="ranking.html" class="active">랭킹</a>
+  </nav>
+  <span class="me" id="me"></span>
+  <button class="ghost" onclick="logout()">로그아웃</button>
+</header>
+
+<main>
+  <h1>수익률 랭킹</h1>
+  <table>
+    <thead>
+      <tr><th>순위</th><th>닉네임</th><th>총 자산</th><th>수익률</th></tr>
+    </thead>
+    <tbody id="rows"><tr><td colspan="4">불러오는 중...</td></tr></tbody>
+  </table>
+  <p class="hint">총 자산 = 보유 현금 + 보유 주식 평가액 (시드머니 1,000만원 기준)</p>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+<script>
+start();
+
+async function start() {
+  const user = await requireLogin();
+  if (!user) return;
+
+  const profile = await myProfile();
+  const myNick = profile ? profile.nickname : '';
+  document.getElementById('me').textContent = myNick + ' 님';
+
+  const { data, error } = await db.rpc('get_ranking');
+  const tbody = document.getElementById('rows');
+
+  if (error) {
+    tbody.innerHTML = '<tr><td colspan="4">불러오기 실패: ' + error.message + '</td></tr>';
+    return;
+  }
+  if (!data.length) {
+    tbody.innerHTML = '<tr><td colspan="4">참가자가 없습니다.</td></tr>';
+    return;
+  }
+
+  const medal = ['🥇', '🥈', '🥉'];
+  tbody.innerHTML = data.map((r, i) => `
+    <tr${r.nickname === myNick ? ' style="background:#eff6ff"' : ''}>
+      <td class="rank">${medal[i] || (i + 1)}</td>
+      <td><strong>${r.nickname}</strong>${r.nickname === myNick ? ' (나)' : ''}</td>
+      <td>${won(r.total_asset)}</td>
+      <td class="${signClass(r.profit_rate)}">${pct(r.profit_rate)}</td>
+    </tr>`).join('');
+}
+</script>
+</body>
+</html>

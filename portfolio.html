@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>내 자산 · 모의 주식 투자</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<header>
+  <span class="logo">📈 모의 주식 투자</span>
+  <nav>
+    <a href="market.html">시세</a>
+    <a href="portfolio.html" class="active">내 자산</a>
+    <a href="ranking.html">랭킹</a>
+  </nav>
+  <span class="me" id="me"></span>
+  <button class="ghost" onclick="logout()">로그아웃</button>
+</header>
+
+<main>
+  <h1>내 자산</h1>
+
+  <div class="card summary">
+    <div><div class="label">총 자산</div><div class="value" id="total">-</div></div>
+    <div><div class="label">현금</div><div class="value" id="cash">-</div></div>
+    <div><div class="label">주식 평가액</div><div class="value" id="stockValue">-</div></div>
+    <div><div class="label">수익률</div><div class="value" id="rate">-</div></div>
+  </div>
+
+  <h2>보유 종목</h2>
+  <table>
+    <thead>
+      <tr><th>종목</th><th>수량</th><th>평균 매입가</th><th>현재가</th><th>평가금액</th><th>수익률</th></tr>
+    </thead>
+    <tbody id="holdings"><tr><td colspan="6">불러오는 중...</td></tr></tbody>
+  </table>
+
+  <h2>최근 거래 내역</h2>
+  <table>
+    <thead>
+      <tr><th>일시</th><th>종목</th><th>구분</th><th>수량</th><th>단가</th><th>금액</th></tr>
+    </thead>
+    <tbody id="transactions"><tr><td colspan="6">불러오는 중...</td></tr></tbody>
+  </table>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="js/config.js"></script>
+<script src="js/app.js"></script>
+<script>
+const SEED = 10000000; // 시드머니
+
+start();
+
+async function start() {
+  const user = await requireLogin();
+  if (!user) return;
+
+  const profile = await myProfile();
+  document.getElementById('me').textContent = profile.nickname + ' 님';
+
+  const stockValue = await loadHoldings();
+  const total = Number(profile.cash) + stockValue;
+
+  document.getElementById('cash').textContent = won(profile.cash);
+  document.getElementById('stockValue').textContent = won(stockValue);
+  document.getElementById('total').textContent = won(total);
+
+  const rate = (total / SEED - 1) * 100;
+  const rateEl = document.getElementById('rate');
+  rateEl.textContent = pct(rate);
+  rateEl.className = 'value ' + signClass(rate);
+
+  await loadTransactions();
+}
+
+async function loadHoldings() {
+  const { data, error } = await db
+    .from('holdings')
+    .select('code, quantity, avg_price, stocks(name, price)');
+
+  const tbody = document.getElementById('holdings');
+  if (error) {
+    tbody.innerHTML = '<tr><td colspan="6">불러오기 실패: ' + error.message + '</td></tr>';
+    return 0;
+  }
+  if (!data.length) {
+    tbody.innerHTML = '<tr><td colspan="6">보유 중인 종목이 없습니다.</td></tr>';
+    return 0;
+  }
+
+  let sum = 0;
+  tbody.innerHTML = data.map(h => {
+    const price = Number(h.stocks?.price || 0);
+    const value = price * h.quantity;
+    const rate = h.avg_price > 0 ? (price / h.avg_price - 1) * 100 : 0;
+    sum += value;
+    return `
+      <tr>
+        <td><strong>${h.stocks?.name || h.code}</strong></td>
+        <td>${h.quantity.toLocaleString()}주</td>
+        <td>${won(h.avg_price)}</td>
+        <td>${won(price)}</td>
+        <td>${won(value)}</td>
+        <td class="${signClass(rate)}">${pct(rate)}</td>
+      </tr>`;
+  }).join('');
+
+  return sum;
+}
+
+async function loadTransactions() {
+  const { data, error } = await db
+    .from('transactions')
+    .select('created_at, code, side, quantity, price, amount')
+    .order('created_at', { ascending: false })
+    .limit(20);
+
+  const tbody = document.getElementById('transactions');
+  if (error) {
+    tbody.innerHTML = '<tr><td colspan="6">불러오기 실패: ' + error.message + '</td></tr>';
+    return;
+  }
+  if (!data.length) {
+    tbody.innerHTML = '<tr><td colspan="6">거래 내역이 없습니다.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = data.map(t => `
+    <tr>
+      <td>${new Date(t.created_at).toLocaleString('ko-KR')}</td>
+      <td>${t.code}</td>
+      <td class="${t.side === 'buy' ? 'up' : 'down'}">${t.side === 'buy' ? '매수' : '매도'}</td>
+      <td>${t.quantity.toLocaleString()}주</td>
+      <td>${won(t.price)}</td>
+      <td>${won(t.amount)}</td>
+    </tr>`).join('');
+}
+</script>
+</body>
+</html>
